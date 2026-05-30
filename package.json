@@ -1,0 +1,1 @@
+{"name":"bitrix24-mcp-server","version":"1.0.0","type":"module","private":true,"scripts":{"start":"node src/server.js"},"dependencies":{"@modelcontextprotocol/sdk":"latest","zod":"latest","dotenv":"latest"},"engines":{"node":">=18"}}
