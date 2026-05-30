@@ -2,7 +2,8 @@ import 'dotenv/config';
 import http from 'node:http';
 
 const PORT = Number(process.env.PORT || 3000);
-const BITRIX24_WEBHOOK_URL = process.env.BITRIX24_WEBHOOK_URL?.trim();
+const RAW_BITRIX24_WEBHOOK_URL = process.env.BITRIX24_WEBHOOK_URL?.trim();
+const BITRIX24_WEBHOOK_URL = RAW_BITRIX24_WEBHOOK_URL?.replace(/^BITRIX24_WEBHOOK_URL\s*=\s*/i, '').trim();
 const TIMEOUT_MS = Number(process.env.B24_TIMEOUT_MS || 20000);
 const ALLOWED_METHODS = new Set(
   (process.env.B24_ALLOWED_METHODS || 'profile,crm.deal.list,crm.deal.add,crm.lead.list,crm.lead.add,crm.contact.list,crm.company.list')
@@ -145,7 +146,7 @@ async function handleRpc(body) {
       result: {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'bitrix24-mcp-server', version: '1.0.1' }
+        serverInfo: { name: 'bitrix24-mcp-server', version: '1.0.2' }
       }
     };
   }
@@ -189,6 +190,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, BITRIX24_WEBHOOK_URL ? 200 : 503, {
         ok: Boolean(BITRIX24_WEBHOOK_URL),
         bitrixWebhookConfigured: Boolean(BITRIX24_WEBHOOK_URL),
+        webhookValueLooksMisconfigured: Boolean(RAW_BITRIX24_WEBHOOK_URL?.startsWith('BITRIX24_WEBHOOK_URL=')),
         allowedMethods: [...ALLOWED_METHODS]
       });
     }
