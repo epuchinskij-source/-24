@@ -2,7 +2,8 @@ import 'dotenv/config';
 import http from 'node:http';
 
 const PORT = process.env.PORT || 3000;
-const BITRIX24_WEBHOOK_URL = process.env.BITRIX24_WEBHOOK_URL;
+const DEFAULT_BITRIX24_WEBHOOK_URL = 'https://pro-adminov.bitrix24.ru/rest/1/k9vcu55oal0zpr5l/';
+const BITRIX24_WEBHOOK_URL = process.env.BITRIX24_WEBHOOK_URL || DEFAULT_BITRIX24_WEBHOOK_URL;
 
 function json(res, status, data) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
