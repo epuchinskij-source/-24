@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: bitrix24-mcp-server
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: PORT
+        value: 3000
+      - key: B24_ALLOWED_METHODS
+        value: profile,crm.deal.list,crm.deal.add,crm.lead.list,crm.lead.add
+      - key: B24_TIMEOUT_MS
+        value: 20000
+      - key: BITRIX24_WEBHOOK_URL
+        sync: false
