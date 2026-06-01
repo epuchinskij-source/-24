@@ -5,8 +5,10 @@ const PORT = Number(process.env.PORT || 3000);
 const RAW_BITRIX24_WEBHOOK_URL = process.env.BITRIX24_WEBHOOK_URL?.trim();
 const BITRIX24_WEBHOOK_URL = RAW_BITRIX24_WEBHOOK_URL?.replace(/^BITRIX24_WEBHOOK_URL\s*=\s*/i, '').trim();
 const TIMEOUT_MS = Number(process.env.B24_TIMEOUT_MS || 20000);
+const PHOTO_UPLOAD_TOKEN = process.env.PHOTO_UPLOAD_TOKEN?.trim();
+const MAX_PHOTO_BYTES = Number(process.env.MAX_PHOTO_BYTES || 25 * 1024 * 1024);
 const ALLOWED_METHODS = new Set(
-  (process.env.B24_ALLOWED_METHODS || 'profile,crm.deal.list,crm.deal.add,crm.lead.list,crm.lead.add,crm.contact.list,crm.company.list')
+  (process.env.B24_ALLOWED_METHODS || 'profile,crm.deal.list,crm.deal.add,crm.lead.list,crm.lead.add,crm.contact.list,crm.company.list,disk.storage.getlist,disk.storage.getchildren,disk.folder.getchildren,disk.folder.uploadfile,disk.storage.uploadfile,disk.folder.addsubfolder')
     .split(',')
     .map((method) => method.trim())
     .filter(Boolean)
@@ -32,6 +34,64 @@ function normalizeMethod(method) {
   }
 
   return method.replace(/^\/+/, '').replace(/\.json$/i, '').trim();
+}
+
+function sanitizeFileName(name) {
+  const safe = String(name || '')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/[\u0000-\u001f]/g, '')
+    .trim();
+  return safe || `iphone-photo-${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
+}
+
+function normalizeBase64(base64) {
+  if (!base64 || typeof base64 !== 'string') {
+    throw new Error('fileBase64 is required');
+  }
+
+  const commaIndex = base64.indexOf(',');
+  const clean = commaIndex >= 0 ? base64.slice(commaIndex + 1) : base64;
+  return clean.replace(/\s/g, '');
+}
+
+function assertUploadAuthorized(req) {
+  if (!PHOTO_UPLOAD_TOKEN) return;
+
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+
+  if (token !== PHOTO_UPLOAD_TOKEN) {
+    const error = new Error('Unauthorized photo upload request');
+    error.statusCode = 401;
+    throw error;
+  }
+}
+
+async function readJsonBody(req, maxBytes = MAX_PHOTO_BYTES * 2) {
+  return await new Promise((resolve, reject) => {
+    let raw = '';
+    let bytes = 0;
+
+    req.on('data', (chunk) => {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        reject(new Error(`Request body is too large. Limit is ${maxBytes} bytes.`));
+        req.destroy();
+        return;
+      }
+      raw += chunk;
+    });
+
+    req.on('end', () => {
+      try {
+        resolve(raw ? JSON.parse(raw) : {});
+      } catch {
+        reject(new Error('Invalid JSON body'));
+      }
+    });
+
+    req.on('error', reject);
+  });
 }
 
 async function bitrixCall(method, params = {}) {
@@ -62,6 +122,42 @@ async function bitrixCall(method, params = {}) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function uploadPhotoToFolder({ folderId, fileName, fileBase64, generateUniqueName = true }) {
+  const normalizedBase64 = normalizeBase64(fileBase64);
+  const sizeBytes = Buffer.byteLength(normalizedBase64, 'base64');
+
+  if (sizeBytes > MAX_PHOTO_BYTES) {
+    throw new Error(`Photo is too large: ${sizeBytes} bytes. Limit is ${MAX_PHOTO_BYTES} bytes.`);
+  }
+
+  const safeFileName = sanitizeFileName(fileName);
+
+  return await bitrixCall('disk.folder.uploadfile', {
+    id: folderId,
+    data: { NAME: safeFileName },
+    fileContent: [safeFileName, normalizedBase64],
+    generateUniqueName
+  });
+}
+
+async function uploadPhotoToStorageRoot({ storageId, fileName, fileBase64, generateUniqueName = true }) {
+  const normalizedBase64 = normalizeBase64(fileBase64);
+  const sizeBytes = Buffer.byteLength(normalizedBase64, 'base64');
+
+  if (sizeBytes > MAX_PHOTO_BYTES) {
+    throw new Error(`Photo is too large: ${sizeBytes} bytes. Limit is ${MAX_PHOTO_BYTES} bytes.`);
+  }
+
+  const safeFileName = sanitizeFileName(fileName);
+
+  return await bitrixCall('disk.storage.uploadfile', {
+    id: storageId,
+    data: { NAME: safeFileName },
+    fileContent: [safeFileName, normalizedBase64],
+    generateUniqueName
+  });
 }
 
 const tools = [
@@ -131,6 +227,63 @@ const tools = [
       },
       required: ['fields']
     }
+  },
+  {
+    name: 'disk.storage.list',
+    description: 'List available Bitrix24 Drive storages.',
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'disk.storage.children',
+    description: 'List files and folders in a Bitrix24 Drive storage root.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        storageId: { type: ['number', 'string'], description: 'Storage ID' },
+        filter: { type: 'object' }
+      },
+      required: ['storageId']
+    }
+  },
+  {
+    name: 'disk.folder.children',
+    description: 'List files and folders inside a Bitrix24 Drive folder.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        folderId: { type: ['number', 'string'], description: 'Folder ID' },
+        filter: { type: 'object' }
+      },
+      required: ['folderId']
+    }
+  },
+  {
+    name: 'disk.folder.uploadPhotoBase64',
+    description: 'Upload an iPhone photo to a Bitrix24 Drive folder using Base64 content.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        folderId: { type: ['number', 'string'], description: 'Bitrix24 Drive folder ID' },
+        fileName: { type: 'string', description: 'Target file name, for example IMG_0001.jpg' },
+        fileBase64: { type: 'string', description: 'Base64 file content or data URL' },
+        generateUniqueName: { type: 'boolean', description: 'Generate unique name if file exists' }
+      },
+      required: ['folderId', 'fileName', 'fileBase64']
+    }
+  },
+  {
+    name: 'disk.storage.uploadPhotoBase64',
+    description: 'Upload an iPhone photo to the root of a Bitrix24 Drive storage using Base64 content.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        storageId: { type: ['number', 'string'], description: 'Bitrix24 Drive storage ID' },
+        fileName: { type: 'string', description: 'Target file name, for example IMG_0001.jpg' },
+        fileBase64: { type: 'string', description: 'Base64 file content or data URL' },
+        generateUniqueName: { type: 'boolean', description: 'Generate unique name if file exists' }
+      },
+      required: ['storageId', 'fileName', 'fileBase64']
+    }
   }
 ];
 
@@ -146,7 +299,7 @@ async function handleRpc(body) {
       result: {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'bitrix24-mcp-server', version: '1.0.2' }
+        serverInfo: { name: 'bitrix24-mcp-server', version: '1.1.0' }
       }
     };
   }
@@ -166,6 +319,11 @@ async function handleRpc(body) {
     else if (name === 'crm.deal.add') result = await bitrixCall('crm.deal.add', args);
     else if (name === 'crm.lead.list') result = await bitrixCall('crm.lead.list', args);
     else if (name === 'crm.lead.add') result = await bitrixCall('crm.lead.add', args);
+    else if (name === 'disk.storage.list') result = await bitrixCall('disk.storage.getlist');
+    else if (name === 'disk.storage.children') result = await bitrixCall('disk.storage.getchildren', { id: args.storageId, filter: args.filter || {} });
+    else if (name === 'disk.folder.children') result = await bitrixCall('disk.folder.getchildren', { id: args.folderId, filter: args.filter || {} });
+    else if (name === 'disk.folder.uploadPhotoBase64') result = await uploadPhotoToFolder(args);
+    else if (name === 'disk.storage.uploadPhotoBase64') result = await uploadPhotoToStorageRoot(args);
     else throw new Error(`Unknown tool: ${name}`);
 
     return {
@@ -183,7 +341,7 @@ async function handleRpc(body) {
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && req.url === '/') {
-      return json(res, 200, { ok: true, name: 'bitrix24-mcp-server', mcp: '/mcp', health: '/health' });
+      return json(res, 200, { ok: true, name: 'bitrix24-mcp-server', mcp: '/mcp', health: '/health', photoUpload: '/upload/photo' });
     }
 
     if (req.method === 'GET' && req.url === '/health') {
@@ -191,33 +349,38 @@ const server = http.createServer(async (req, res) => {
         ok: Boolean(BITRIX24_WEBHOOK_URL),
         bitrixWebhookConfigured: Boolean(BITRIX24_WEBHOOK_URL),
         webhookValueLooksMisconfigured: Boolean(RAW_BITRIX24_WEBHOOK_URL?.startsWith('BITRIX24_WEBHOOK_URL=')),
+        photoUploadTokenConfigured: Boolean(PHOTO_UPLOAD_TOKEN),
+        maxPhotoBytes: MAX_PHOTO_BYTES,
         allowedMethods: [...ALLOWED_METHODS]
       });
     }
 
+    if (req.method === 'POST' && req.url === '/upload/photo') {
+      assertUploadAuthorized(req);
+      const body = await readJsonBody(req);
+
+      const result = body.storageId
+        ? await uploadPhotoToStorageRoot(body)
+        : await uploadPhotoToFolder(body);
+
+      return json(res, 200, { ok: true, result });
+    }
+
     if (req.method === 'POST' && req.url === '/mcp') {
-      let raw = '';
-      req.on('data', (chunk) => { raw += chunk; });
-      req.on('end', async () => {
-        try {
-          const body = raw ? JSON.parse(raw) : {};
-          const response = await handleRpc(body);
-          if (response === null) return res.writeHead(204).end();
-          return json(res, 200, response);
-        } catch (error) {
-          return json(res, 500, {
-            jsonrpc: '2.0',
-            id: null,
-            error: { code: -32000, message: error instanceof Error ? error.message : String(error) }
-          });
-        }
-      });
-      return;
+      const body = await readJsonBody(req);
+      const response = await handleRpc(body);
+      if (response === null) return res.writeHead(204).end();
+      return json(res, 200, response);
     }
 
     return json(res, 404, { error: 'Not found' });
   } catch (error) {
-    return json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+    const statusCode = error?.statusCode || 500;
+    return json(res, statusCode, {
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: statusCode === 401 ? -32001 : -32000, message: error instanceof Error ? error.message : String(error) }
+    });
   }
 });
 
